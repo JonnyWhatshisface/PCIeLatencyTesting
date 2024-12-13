@@ -10,10 +10,12 @@
 #include <linux/pci.h>
 #include <linux/err.h>
 
-#define DRIVER_NAME     "pcilatdriver"
-#define MSI_IRQ_MIN     4                   /* Minimum number of vectors / IRQs */
-#define MSI_IRQ_MAX     4                   /* Maximum number of vectors / IRQs */
+#define DRIVER_NAME             "pcilatdriver"
+#define MSI_IRQ_MIN             4                   /* Minimum number of vectors / IRQs */
+#define MSI_IRQ_MAX             4                   /* Maximum number of vectors / IRQs */
 
+#define TEST_DEFAULT_NDELAY     800
+#define TEST_DEFAULT_LOOPS      1000
 
 static struct class *pcilat_class;
 
@@ -45,6 +47,4 @@ struct pcilat_priv {
     int irqs[32];
 };
 
-irqreturn_t irq_handler(int,void *);
-int trigger_interrupt(int);
 #endif

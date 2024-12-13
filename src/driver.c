@@ -1,5 +1,10 @@
 #include "driver.h"
+#include "pcireg.h"
+#include "drvcfg.h"
+#include "int.h"
+#include "iomem.h"
 #include "tsc.h"
+#include "chrdev.h"
 
 static char device[2048] __initdata;
 
@@ -13,8 +18,15 @@ static struct pci_driver pcilat_driver = {
     .remove     =   pcilat_remove
 };
 
+/* Character device */
+static const struct file_operations pcilat_chr_ops = {
+    .owner      =   THIS_MODULE,
+    .open       =   pcilat_dev_open,
+    .read       =   pcilat_dev_read
+};
+
 module_param_string(device, device, sizeof(device), 0);
-MODULE_PARM_DESC(device, "Initial PCI IDs to add to the driver. Command separated "
+MODULE_PARM_DESC(device, "Initial PCI IDs to add to the driver. Comma separated "
                 "list formatted as \"vendor:device[:subvendor[:subdevice[:class[:class_mask]]]]\""
                 );
 
@@ -26,129 +38,16 @@ MODULE_PARM_DESC(device, "Initial PCI IDs to add to the driver. Command separate
     /sys/bus/pci/devices/0000:02:00.0/pcilatdriver/02:00.0/pcilat_*
 */
 
-static ssize_t pcilat_config_read(struct device *dev, struct device_attribute *attr, char *buf) {
-    /* Show configuration options */
-    struct pcilat_priv *priv = dev_get_drvdata(dev);
-    char *out = "bar %d\nloops %d\nndelay %d\n";
-
-    return scnprintf(buf, PAGE_SIZE, out, priv->test.bar, priv->test.loops, priv->test.ndelay);
-}
-
-static ssize_t pcilat_config_write(struct device *dev, struct device_attribute *attr, const char *buf, size_t count) {
-    /* 
-        Set configuration options for the benchmark tests.
-        Invalid settings return -EINVAL.
-    */
-    struct pcilat_priv *priv = dev_get_drvdata(dev);
-    int fields, rc, tmp;
-    char arg1[200], arg2[200];
-    char *check = buf; /* Yes, we discard the quantifier here. It's fine. No, really... */
-    check[strlen(check)-1] = '\0';
-    fields = sscanf(check, "%s %s", arg1, arg2);
-
-    if (strcmp(arg1, "bar") == 0) {
-            rc = kstrtoint(arg2, 0, &tmp);
-            if (tmp >= 0 && tmp < 6 && priv->bar[tmp].addr != NULL) {
-                priv->test.bar = tmp;
-                dev_info(&priv->pdev->dev, "Config Set: BAR %d - Done\n", tmp);
-            } else {
-                dev_info(&priv->pdev->dev, "Config Set: BAR %d - Failed: not a valid bar\n", tmp);                
-                return -EINVAL;
-            }
-    } else if (strcmp(arg1, "loops") == 0) {
-            rc = kstrtoint(arg2, 0, &tmp);
-            if (tmp > 0 && tmp <= 500000) {
-                priv->test.loops = tmp;
-                dev_info(&priv->pdev->dev, "Config Set: LOOPS %d - Done\n", tmp);
-            } else {
-                dev_info(&priv->pdev->dev, "Config Set: LOOPS %d - Failed: not a valid value [1-500000]\n", tmp);
-                return -EINVAL;
-            }
-    } else if (strcmp(arg1, "ndelay") == 0) {
-            rc = kstrtoint(arg2, 0, &tmp);
-            if (tmp > 0 && tmp <= 50000) {
-                priv->test.ndelay = tmp;
-                dev_info(&priv->pdev->dev, "Config Set: NDELAY %d - Done\n", tmp);
-            } else {
-                dev_info(&priv->pdev->dev, "Config Set: LOOPS %d - Failed: not a valid value [1-50000]\n", tmp);
-                return -EINVAL;
-            }
-    }
-
-    return count;
-}
-
-static ssize_t pcilat_iomem_read(struct device *dev, struct device_attribute *attr, char *buf) {
-    dev_info(dev, "Opened iomem measure device\n");
-    return 0;
-}
-
-static ssize_t pcilat_iomem_write(struct device *dev, struct device_attribute *attr, const char *buf, size_t count) {
-    /* 
-        Takes options to trigger a latency measurement to device. Format should be:
-    
-        CPUS BAR ITERATIONS or just CPUS
-
-        CPU's can be a list with ranges, i.e. 0,1,3-4,6
-
-        To read results of all latency measurements, simply cat this device.
-
-     */
-    return 0;
-}
-
-static ssize_t pcilat_interrupt_read(struct device *dev, struct device_attribute *attr, char *buf) {
-    dev_info(dev, "Opened interrupt device\n");
-    return 0;
-}
-
-static ssize_t pcilat_interrupt_write(struct device *dev, struct device_attribute *attr, const char *buf, size_t count) {
-    /* 
-        Used to trigger and measure latency of interrupt raising and servicing.
-    
-        To read the results stored, simply cat this device.
-     */
-    struct pcilat_priv *priv = dev_get_drvdata(dev);
-    int fields, rc, irq, cpu, intnum, i, found;
-    char arg1[200], arg2[200];
-    char *check = buf; /* Yes, we discard the quantifier here. It's fine. No, really... */
-    check[strlen(check)-1] = '\0';
-    fields = sscanf(check, "%s %s", arg1, arg2);
-    rc = kstrtoint(arg1, 0, &irq);
-    rc = kstrtoint(arg2, 0, &cpu);
-    found = 0;
-
-    if(irq < 0) {
-        dev_info(&priv->pdev->dev, "Trigger Interrupt: IRQ %d invalid...\n", irq);
-        goto done;
-    }
-    
-    /* Iterate our registered IRQ's and see if this is one of them */
-    for(i = 0; i < 32; i++)
-        if (priv->irqs[i] == irq)
-            found = 1;
-    if (!found) {
-        /* Not ours so not our business... */
-        dev_info(&priv->pdev->dev, "IRQ %d does not belong to this device...\n", irq);
-        goto done;
-    }
-
-    /* IRQ belongs to this device */
-    dev_info(&priv->pdev->dev, "%d belongs to us, calling interrupt trigger\n", irq);
-    trigger_interrupt(irq);
-    
-done:    
-    return count;
-}
-
 static DEVICE_ATTR(pcilat_config, 0644, pcilat_config_read, pcilat_config_write);
 static DEVICE_ATTR(pcilat_iomem, 0644, pcilat_iomem_read, pcilat_iomem_write);
 static DEVICE_ATTR(pcilat_interrupt, 0644, pcilat_interrupt_read, pcilat_interrupt_write);
+static DEVICE_ATTR(pcilat_devreg, 0644, pcilat_devreg_read, pcilat_devreg_write);
 
 static struct attribute *pcilat_attrs[] = {
     &dev_attr_pcilat_config.attr,
     &dev_attr_pcilat_iomem.attr,
     &dev_attr_pcilat_interrupt.attr,
+    &dev_attr_pcilat_devreg.attr,
     NULL,
 };
 
@@ -168,32 +67,6 @@ ATTRIBUTE_GROUPS(pcilat);
 
 */
 
-static int pcilat_dev_open(struct inode *inode, struct file *file) {
-    /* Setup private structure and make it available to all fops */
-	struct pcilat_priv *priv = container_of(inode->i_cdev, struct pcilat_priv, cdev);
-	file->private_data = priv;
-
-    return 0;
-}
-
-static ssize_t pcilat_dev_read(struct file *file, char __user *buf, size_t count, loff_t *ppos) {
-    /* And now we can access pcilat_priv like so */
-    struct pcilat_priv *priv = file->private_data;
-
-    return 0;
-}
-
-static const struct file_operations pcilat_chr_ops = {
-    .owner      =   THIS_MODULE,
-    .open       =   pcilat_dev_open,
-    .read       =   pcilat_dev_read
-};
-
-static char *pci_char_devnode(struct device *dev, umode_t *mode) {
-    struct pci_dev *pdev = to_pci_dev(dev->parent);
-    return kasprintf(GFP_KERNEL, DRIVER_NAME "/%02x:%02x.%x", pdev->bus->number, PCI_SLOT(pdev->devfn), PCI_FUNC(pdev->devfn));
-}
-
 static int pcilat_probe(struct pci_dev *pdev, const struct pci_device_id *id) {
     /*
         During the probe, we'll map desired BAR's and registry IRQ handlers
@@ -202,15 +75,14 @@ static int pcilat_probe(struct pci_dev *pdev, const struct pci_device_id *id) {
     struct pcilat_priv *priv;
     struct device *dev;
 
-    u16 statreg;
 
     pr_info(DRIVER_NAME ": Probing device %02x:%02x.%x", pdev->bus->number, PCI_SLOT(pdev->devfn), PCI_FUNC(pdev->devfn));
     priv = kzalloc(sizeof(struct pcilat_priv), GFP_KERNEL);
     if (!priv)
         return -ENOMEM;
     /* Assign test defaults */
-    priv->test.ndelay = 800;
-    priv->test.loops = 1000;
+    priv->test.ndelay = TEST_DEFAULT_NDELAY;
+    priv->test.loops = TEST_DEFAULT_LOOPS;
     priv->test.type = TEST_RO;
     priv->pdev = pdev;
 
@@ -291,23 +163,7 @@ static int pcilat_probe(struct pci_dev *pdev, const struct pci_device_id *id) {
         priv->irqs[i] = -1;
     }
     pci_intx(pdev, 1);
-    pci_read_config_word(pdev, PCI_COMMAND, &statreg);
-    if((statreg >>10) & 0x1) {
-        dev_info(&pdev->dev, "Status is 1\n");
-    } else {
-        dev_info(&pdev->dev, "Status is 0\n");
-    }
-
     
-    statreg |= 0 >>0;
-    pci_write_config_word(pdev, PCI_COMMAND, PCI_COMMAND & ~(1 <<0x10));
-    pci_read_config_word(pdev, PCI_COMMAND, &statreg);
-    if((statreg >>10) & 0x1) {
-        dev_info(&pdev->dev, "Status 1\n");
-    } else {
-        dev_info(&pdev->dev, "Status 0\n");
-    }
-
     dev_info(&pdev->dev, "Device now claimed by " DRIVER_NAME "\n");
 
     return 0;

@@ -1,6 +1,50 @@
 #include "driver.h"
 #include "int.h"
 
+ssize_t pcilat_interrupt_read(struct device *dev, struct device_attribute *attr, char *buf) {
+    dev_info(dev, "Opened interrupt device\n");
+    return 0;
+}
+
+ssize_t pcilat_interrupt_write(struct device *dev, struct device_attribute *attr, const char *buf, size_t count) {
+    /*
+        Used to trigger and measure latency of interrupt raising and servicing.
+
+        To read the results stored, simply cat this device.
+     */
+    struct pcilat_priv *priv = dev_get_drvdata(dev);
+    int fields, rc, irq, cpu, intnum, i, found;
+    char arg1[200], arg2[200];
+    char *check = buf; /* Yes, we discard the quantifier here. It's fine. No, really... */
+    check[strlen(check)-1] = '\0';
+    fields = sscanf(check, "%s %s", arg1, arg2);
+    rc = kstrtoint(arg1, 0, &irq);
+    rc = kstrtoint(arg2, 0, &cpu);
+    found = 0;
+
+    if(irq < 0) {
+        dev_info(&priv->pdev->dev, "Trigger Interrupt: IRQ %d invalid...\n", irq);
+        goto done;
+    }
+
+    /* Iterate our registered IRQ's and see if this is one of them */
+    for(i = 0; i < 32; i++)
+        if (priv->irqs[i] == irq)
+            found = 1;
+    if (!found) {
+        /* Not ours so not our business... */
+        dev_info(&priv->pdev->dev, "IRQ %d does not belong to this device...\n", irq);
+        goto done;
+    }
+
+    /* IRQ belongs to this device */
+    dev_info(&priv->pdev->dev, "%d belongs to us, calling interrupt trigger\n", irq);
+    trigger_interrupt(irq);
+
+done:
+    return count;
+}
+
 irqreturn_t irq_handler(int irq, void *cookie) {
     (void) cookie;
     pr_info(DRIVER_NAME ": Intterrupt entered... Handling IRQ %d on CPU %d\n", irq, get_cpu());
